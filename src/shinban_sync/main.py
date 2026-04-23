@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import List
 
@@ -165,8 +166,9 @@ async def scraping_loop(config_path: str, interval: int):
 
 async def async_main():
     args = parse_args()
+    env_bot_flag = os.getenv("ENABLE_TELEGRAM_BOT", "").strip().lower() in ["true", "1", "yes"]
 
-    if args.bot:
+    if args.bot or env_bot_flag:
         logger.info("正在启动 Telegram Bot...")
         bot = Bot(ConfigManager(args.config))
 
