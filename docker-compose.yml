@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   shinban-sync:
     image: ghcr.io/wisecirno/shinban-sync:latest
