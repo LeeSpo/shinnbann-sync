@@ -188,6 +188,19 @@ async def async_main():
         bot = Bot(ConfigManager(args.config), wake_event = wake_event)
 
         await bot.app.initialize()
+
+        # 自动向 Telegram 注册菜单指令列表
+        from telegram import BotCommand
+        try:
+            await bot.app.bot.set_my_commands([
+                BotCommand("subscribe", "订阅新番"),
+                BotCommand("unsubscribe", "取消订阅番剧"),
+                BotCommand("refresh", "手动唤醒并刷新检索")
+            ])
+            logger.info("🤖 [系统启动] 快捷指令列表已成功注册至 Telegram")
+        except Exception as e:
+            logger.warning(f"⚠️ [系统启动] 快捷指令列表注册失败: {e}")
+
         await bot.app.start()
         await bot.app.updater.start_polling()
         logger.info("🤖 [系统启动] Telegram Bot 已成功启用并开始接收消息")
