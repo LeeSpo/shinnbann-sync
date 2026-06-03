@@ -11,6 +11,7 @@ from src.shinban_sync.core.logger import logger
 from src.shinban_sync.metadata.acg_rip import AcgRipProvider
 from src.shinban_sync.metadata.tmdb import TMDBProvider
 from src.shinban_sync.models.bangumi import BangumiInfo
+from src.shinban_sync.models.config import BangumiConfig
 from src.shinban_sync.models.tmdb import TMDBTVSearchItem, TMDBSeason, TMDBSeriesDetails
 
 
@@ -22,6 +23,7 @@ class Bot:
 
         self.app = Application.builder().token(config.get_telegram_bot_token()).build()
         self.app.add_handler(CommandHandler("subscribe", self.subscribe_command))
+        self.app.add_handler(CommandHandler("unsubscribe", self.unsubscribe_command))
         self.app.add_handler(CommandHandler("refresh", self.refresh_command))
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
         self.app.add_error_handler(self.error_handler)
@@ -146,6 +148,10 @@ class Bot:
         query = update.callback_query
         data = query.data
         await query.answer()
+
+        if data.startswith("unsub_"):
+            await self.handle_unsubscribe_callback(update, context)
+            return
 
         tmdb_results = context.user_data.get('tmdb_results')
         if not tmdb_results:
@@ -344,6 +350,134 @@ class Bot:
             return
 
         logger.error(f"Telegram Bot 发生未捕获的异常: {exc}")
+
+    @staticmethod
+    def _build_unsubscribe_keyboard(configs: List[BangumiConfig], page: int) -> InlineKeyboardMarkup:
+        per_page = 8
+        total_pages = (len(configs) + per_page - 1) // per_page
+        start_idx = page * per_page
+        end_idx = start_idx + per_page
+        current_configs = configs[start_idx:end_idx]
+
+        keyboard = []
+        for i, anime in enumerate(current_configs):
+            global_idx = start_idx + i
+            keyboard.append([InlineKeyboardButton(
+                f"{anime.filename} (第 {anime.season} 季)",
+                callback_data = f"unsub_sel_{global_idx}"
+            )])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("上一页", callback_data = f"unsub_page_{page - 1}"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("下一页", callback_data = f"unsub_page_{page + 1}"))
+
+        if nav_row:
+            keyboard.append(nav_row)
+
+        keyboard.append([InlineKeyboardButton("取消", callback_data = "unsub_cancel")])
+        return InlineKeyboardMarkup(keyboard)
+
+    async def unsubscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._is_valid_user(update):
+            return
+
+        configs = self.config.get_anime_configs()
+        if not configs:
+            await update.message.reply_text("当前没有订阅任何番剧。", parse_mode = "HTML")
+            return
+
+        context.user_data['unsub_list'] = configs
+        context.user_data['current_unsub_page'] = 0
+
+        await update.message.reply_text(
+            text = "👇 请选择要取消订阅的番剧：",
+            reply_markup = self._build_unsubscribe_keyboard(configs, page = 0)
+        )
+
+    async def handle_unsubscribe_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        data = query.data
+
+        unsub_list = context.user_data.get('unsub_list')
+        if not unsub_list:
+            unsub_list = self.config.get_anime_configs()
+            context.user_data['unsub_list'] = unsub_list
+
+        if data == "unsub_cancel":
+            await query.edit_message_text("已取消操作。")
+            context.user_data.clear()
+            return
+
+        elif data.startswith("unsub_page_"):
+            page = int(data.split("_")[-1])
+            context.user_data['current_unsub_page'] = page
+            await query.edit_message_reply_markup(
+                reply_markup = self._build_unsubscribe_keyboard(unsub_list, page)
+            )
+
+        elif data.startswith("unsub_sel_"):
+            idx = int(data.split("_")[-1])
+            if idx >= len(unsub_list):
+                await query.edit_message_text("❌ 操作无效，订阅列表已发生变化。")
+                context.user_data.clear()
+                return
+
+            anime = unsub_list[idx]
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("确定删除", callback_data = f"unsub_confirm_{idx}"),
+                    InlineKeyboardButton("返回列表", callback_data = "unsub_back_list")
+                ]
+            ])
+            await query.edit_message_text(
+                text = (
+                    f"⚠️ <b>确定要取消该订阅吗？</b>\n\n"
+                    f"📺 <b>番名：</b><code>{anime.filename}</code>\n"
+                    f"🌸 <b>季数：</b>第 {anime.season} 季\n"
+                    f"📝 <b>字幕：</b>{anime.subtitle.name}"
+                ),
+                parse_mode = "HTML",
+                reply_markup = keyboard
+            )
+
+        elif data == "unsub_back_list":
+            page = context.user_data.get('current_unsub_page', 0)
+            unsub_list = self.config.get_anime_configs()
+            context.user_data['unsub_list'] = unsub_list
+            if not unsub_list:
+                await query.edit_message_text("当前没有订阅任何番剧。")
+                context.user_data.clear()
+                return
+            await query.edit_message_text(
+                text = "👇 请选择要取消订阅的番剧：",
+                reply_markup = self._build_unsubscribe_keyboard(unsub_list, page)
+            )
+
+        elif data.startswith("unsub_confirm_"):
+            idx = int(data.split("_")[-1])
+            if idx >= len(unsub_list):
+                await query.edit_message_text("❌ 操作无效，订阅列表已发生变化。")
+                context.user_data.clear()
+                return
+
+            anime = unsub_list[idx]
+            success = self.config.remove_anime_config(anime.filename, anime.season)
+            if success:
+                await query.edit_message_text(
+                    text = (
+                        f"❌ <b>已成功取消订阅！</b>\n\n"
+                        f"📺 番名：<code>{anime.filename}</code>\n"
+                        f"🌸 季数：第 {anime.season} 季"
+                    ),
+                    parse_mode = "HTML"
+                )
+            else:
+                await query.edit_message_text(
+                    text = f"⚠️ <b>取消订阅失败</b>，可能该番剧已被手动删除。"
+                )
+            context.user_data.clear()
 
     def run(self):
         self.app.run_polling()
